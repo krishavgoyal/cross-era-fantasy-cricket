@@ -1,0 +1,192 @@
+# Cross-Era Fantasy Cricket - VACE generation pipeline
+
+> This is the deadline pipeline (rtmlib DWPose on CPU -> Wan2.1-VACE-1.3B on a free Kaggle T4 -> era filters -> metrics -> final edit). The teammates' Student 1/2/3 engine is documented in `README.md`; this file covers only the new pipeline.
+
+Animate a historical cricketer from a single reference photo, using motion extracted from a modern cricket clip. Then style the result like footage from the player's era.
+
+> All generated videos are **AI-generated, for academic use only**. They are not real footage.
+
+## Pipeline
+
+```
+ modern clip (.mp4)                        reference photo (.png/.jpg)
+        │                                            │
+ [1] extract_pose.py   (laptop CPU, rtmlib DWPose)   │
+        │  raw.npz + overlay.mp4                     │
+        ▼                                            │
+ [2] make_control.py   (laptop CPU) ◄────────────────┤  --ref-photo: per-bone retarget
+        │  control_33.mp4 (480x832, 16 fps, 33 frames, OpenPose skeleton on black)
+        │  + control_33.npz (keypoints for metrics)
+        ▼                                            ▼
+ [3] kaggle/vace_generate.ipynb   (Kaggle T4, ComfyUI, Wan2.1-VACE-1.3B)
+        │  gen_<pair>.mp4 + kaggle_runs.csv (time, peak VRAM)
+        ▼
+ [4] era_filters.py    (laptop CPU)  1930s_film | 1970s_tv | 1990s_broadcast
+        ▼
+ [5] eval_metrics.py   (laptop CPU)  PCK@0.2, DINOv2 identity, flicker → results/metrics.csv
+        ▼
+ [6] make_sequence.py  (ffmpeg)      bowler clip + batter clip (+ title cards) → final.mp4
+```
+
+The bowler and the batter are generated as **separate clips** and cut together, the way a TV broadcast cuts between them.
+
+## Relation to team engine
+- **Student 2's AnimateDiff engine on `main`** (`generation_engine.py`, `generate_cli.py`) is our **baseline**.
+- **VACE (this pipeline)** is the **new generator**.
+- Both are compared on the **same cover-drive clip**, with the same reference photo and the same metrics, so the report can show the difference directly.
+- We do not modify the team's files; this pipeline lives in `scripts/`, `kaggle/` and the `*_PIPELINE`/`-pipeline` docs.
+
+## Setup (laptop, once)
+
+```powershell
+cd "C:\Users\ASUS V16\OneDrive\Desktop\Cross_Era_Fantasy_Cricket"
+py -3.12 -m venv C:\cefc\venv            # keep the venv outside OneDrive
+C:\cefc\venv\Scripts\Activate.ps1        # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+python -m pip install --upgrade pip
+pip install -r requirements-pipeline.txt
+```
+
+`ffmpeg` is optional for stages 1–2. If it is on PATH, videos are re-encoded to H.264. It is required for stage 6 (`winget install Gyan.FFmpeg`).
+
+## Run each stage
+
+Put your inputs in `data/` (git-ignored), for example `data/clips/bowler.mp4`, `data/clips/batter.mp4`, `data/refs/holding.png`.
+
+**1. Pose extraction.** First list the people detected on frame 0 so you can pick the target player:
+
+```powershell
+python scripts\extract_pose.py --video data\clips\batter.mp4 --out data\pose\batter --list-boxes
+# open data\pose\batter\frame0_boxes.jpg, choose the player's box, then:
+python scripts\extract_pose.py --video data\clips\batter.mp4 --out data\pose\batter --init-box 410,120,180,460
+```
+
+Output: `data\pose\batter\raw.npz`, plus `overlay.mp4`, which you should check by eye.
+
+**2. Control video.**
+
+```powershell
+python scripts\make_control.py --pose data\pose\batter\raw.npz --out data\pose\batter --start 0.5 --ref-photo data\refs\tendulkar.png
+```
+
+Output: `control_33.mp4`, `control_33.npz` and `control_33_preview.jpg`. Options:
+- `--frames` (default 33)
+- `--duration` (seconds of source squeezed into the clip)
+- `--no-face`, `--no-hands`
+
+**3. Generation (Kaggle, `kaggle/vace_generate.ipynb`).**
+1. Make a folder `cefc-inputs/` with `refs/` (photos), `controls/` (the `control_33.mp4` files) and `pairs.csv` (`name,ref,control[,prompt]`).
+2. Kaggle -> Datasets -> New Dataset -> upload that folder (Private).
+3. New Notebook -> File -> Import Notebook -> `kaggle/vace_generate.ipynb` -> Add Input -> your dataset.
+4. Settings: Accelerator **GPU T4 x2**, Internet **On** (phone verification needed), keep it Private.
+5. Run cells top to bottom until the 17-frame smoke test passes, then **Save Version -> Save & Run All**.
+
+Outputs: `outputs/*.mp4` (labelled "AI-generated - academic project"), `outputs_raw/*.mp4` (no label, for metrics), `outputs.zip`, `kaggle_runs.csv` (time and peak VRAM per run). Download them into `data/gen/`.
+
+**4. Era styling** (use the UNLABELLED `outputs_raw/` videos; the label is added by this script):
+
+```powershell
+python scripts\era_filters.py --input data\gen\outputs_raw\batter_33f.mp4 --preset 1930s_film
+python scripts\era_filters.py --input data\gen\outputs_raw --preset all --out-dir data\styled
+```
+
+Presets: `1930s_film` (grayscale, grain, blur, gate jitter, flicker, vignette, 18 fps; `--sepia` for a warm tint), `1970s_tv` (desaturation, colour fringing, scanlines, tape noise, 25 fps), `1990s_broadcast` (mild colour, chroma bleed, softness, 25 fps). Seeded, so the same input and `--seed` always give the same output. Output: `data\styled\<name>_<preset>.mp4`.
+
+**5. Metrics** (CPU; identity needs CPU torch + transformers + pillow, see `requirements-pipeline.txt`):
+
+```powershell
+python scripts\eval_metrics.py --name batter_vace --video data\gen\outputs_raw\batter_33f.mp4 `
+  --styled data\styled\batter_33f_1930s_film.mp4 data\styled\batter_33f_1970s_tv.mp4 `
+  --control data\pose\batter\control_33.npz --ref-photo data\refs\bradman.png
+```
+
+Appends one row per video to `results/metrics.csv` (commit it): `pck@0.2` (17 body keypoints vs the control), `dino_mean` / `dino_min` (identity vs the photo, grayscale), `brightness_std` and `frame_diff_mean` (flicker). Run the same command on the AnimateDiff baseline output with a different `--name` to compare.
+
+**6. Final sequence** (needs ffmpeg):
+
+```powershell
+python scripts\make_sequence.py --clips data\styled\bowler_33f_1970s_tv.mp4 data\styled\batter_33f_1990s_broadcast.mp4 `
+  --cards "Holding bowls" "Tendulkar drives" --intro "Michael Holding vs Sachin Tendulkar" --out data\final\final.mp4
+```
+
+All parts are letterboxed to the first clip's size and 25 fps (`--size`, `--fps` to change); title cards carry the AI-generated label.
+
+## Final video (real speed, 1930s look) - one command
+
+The 33-frame outputs cover 5.6 s of the source but play at 16 fps (~2 s, 2.7x too fast). `make_final.py` retimes
+them to the real 5.6 s at 24 fps (`retime.py`, default method `blend`), applies the era filters (duration kept,
+label burned) and builds the presentation videos:
+
+```powershell
+python scripts\make_final.py --input data\gen\v3_raw\final_cap_s42_33f.mp4 --tag _cap        # depth control is the default --control
+python scripts\make_final.py --input data\gen\v3_raw\final_nocap_s42_33f.mp4 --tag _nocap
+# run A (pose control):
+python scripts\make_final.py --input data\gen\v1_raw\bradman_batting_33f.mp4 --control data\pose\batter\control_33.mp4
+```
+
+Outputs in `data\final\`:
+- `final<tag>.mp4`: intro card + 1930s clip.
+- `final_eras<tag>.mp4`: 1930s / 1970s / 1990s, each after a title card.
+- `compare<tag>.mp4`: source | control | generated, on the same timeline.
+- `work\`: intermediates.
+
+Retime methods (`python scripts\retime.py --method hold|blend|mci`):
+- `hold`: crisp but steps every 0.175 s.
+- `blend`: faint ghosting on the fastest frames but never distorts the bat. **Default.**
+- `mci`: motion-compensated, but it tore the thin bat in the interpolated frames and came out ~4 frames short. Not used.
+
+## Milestone 4: cross-era catalog, era evaluation, figures, presentation
+
+Final choices: batter **F1** `final_cap_s42_33f.mp4` (real speed, 5.6 s), bowler **L3** `L3_s2024_33f.mp4` (2x slow motion, 4.0 s, `hold` retime).
+
+```powershell
+python scripts\make_match.py              # final_match.mp4 (defaults: L3 4.0 s slow motion + F1, both 1930s)
+python scripts\make_final.py --input data\gen\bowler_raw\L3_s2024_33f.mp4 --tag _bowler --source-duration 4.0 --source-real-duration 2.0 --method hold --source-clip data\clips\B1_bowler.mp4 --control data\pose\bowler\depth_33.mp4 --title "Harold Larwood - bowling, reimagined (slow motion)"
+python scripts\make_catalog.py            # data\final\catalog\: match per era, match_crossera.mp4, catalog_reel.mp4 + docs\CATALOG.md
+python scripts\era_eval.py                # results\era_eval.csv: raw vs each era (PCK, identity, flicker, warping error)
+python scripts\make_figures.py            # docs\report\figs\ (ablation, final, pipeline, bowler, era strips)
+python scripts\make_presentation.py       # data\final\presentation_draft.mp4 (2:30, 1920x1080, no audio)
+```
+
+- `make_match.py --bowler-era 1930s_film --batter-era 1990s_broadcast --style-cards` makes a true cross-era match.
+- The video plan and narration are in `docs\VIDEO_SCRIPT.md` and `docs\VIDEO_NARRATION.md`.
+
+## Bowler (Larwood) and the match video
+
+```powershell
+python scripts\extract_pose.py --video data\clips\B1_bowler.mp4 --out data\pose\bowler --list-boxes      # pick the central bowler
+python scripts\extract_pose.py --video data\clips\B1_bowler.mp4 --out data\pose\bowler --init-box 136,151,295,782
+python scripts\make_control.py --pose data\pose\bowler\raw.npz --out data\pose\bowler --start 0 --duration 2.0 --top-margin 0.08 --name control_33_margin
+python scripts\make_depth_control.py --video data\clips\B1_bowler.mp4 --pose data\pose\bowler\raw.npz --out data\pose\bowler --start 0 --duration 2.0 --top-margin 0.08 --soften-head --target-only
+python scripts\prepare_ref.py --input "C:\Users\ASUS V16\Downloads\larwood.jpg" --out data\refs\larwood_crop.png --compare-with data\refs\larwood_orig.jpg --compare-out ref_compare_larwood.png
+python scripts\build_kaggle_inputs.py --preset bowler          # -> C:\cefc\cefc-inputs-bowler.zip (L1/L2/L3)
+# Kaggle: notebook Cell 1 RUN_MODE = "pairs" (default). Then, after downloading outputs_raw to data\gen\bowler_raw\:
+python scripts\make_final.py --input data\gen\bowler_raw\L1_s42_33f.mp4 --tag _bowler --source-duration 2.0 --source-clip data\clips\B1_bowler.mp4 --control data\pose\bowler\depth_33.mp4 --title "Harold Larwood - bowling, reimagined"
+python scripts\make_match.py --bowler data\gen\bowler_raw\L1_s42_33f.mp4      # batter default: final_cap (the chosen batter final)
+python scripts\score_ablation.py                                # L1-L3 identity is scored against Larwood
+```
+
+`--target-only` keeps only the tracked player in the depth map (person mask + skeleton capsule), so other people in the
+clip (here the fielders' legs) do not become extra players. The bowler clip is sampled at real speed (2.0 s ->
+33 frames at 16 fps), so `--source-duration 2.0` means no stretch.
+
+## Likeness + bat ablation (v2)
+
+```powershell
+# tight reference: background removed, on white, body ~90% of 480x832, head near the top -> check data\refs\ref_compare.png
+python scripts\prepare_ref.py --input "C:\Users\ASUS V16\Downloads\bradman_raw.tif" --out data\refs\bradman_crop.png
+# pose control with an 8% top margin (keeps the old control_33.* untouched)
+python scripts\make_control.py --pose data\pose\batter\raw.npz --out data\pose\batter --start 0 --duration 5.6 --top-margin 0.08 --name control_33_margin
+# depth control, same timing/crop as the pose control -> check depth_preview.mp4 and depth_align_check.jpg
+python scripts\make_depth_control.py --video data\clips\C2_coverdrive.mp4 --pose data\pose\batter\raw.npz --out data\pose\batter --start 0 --duration 5.6 --top-margin 0.08 --soften-head
+# Kaggle input zip (C:\cefc\cefc-inputs-v2.zip) with runs B, C, D1-D4
+python scripts\build_kaggle_inputs.py
+# after the Kaggle run: put outputs_raw files in data\gen\v2_raw\ (run A in data\gen\v1_raw\), then
+python scripts\score_ablation.py          # -> results\ablation.csv
+```
+The plan and baseline numbers are in `docs/REPORT_NOTES.md`, section 5.
+
+## Background
+- `README.md`: the teammates' original engine (AnimateDiff-based)
+- `docs/PROJECT_PROPOSAL.md`: the original proposal.
+- `docs/research/`: Phase 0 and 0.1 research summaries.
+- `CLAUDE.md`: the final technical decisions.

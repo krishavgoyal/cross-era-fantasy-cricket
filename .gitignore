@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Secrets (never commit)
+kaggle.json
+.env
+
+# Model weights / caches
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.gguf
+.cache/
+
+# Videos, arrays, archives and working data (shared via Drive / GitHub Releases, not git)
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.npz
+*.npy
+*.zip
+*.tif
+*.tiff
+data/
+outputs/
+kaggle/output/

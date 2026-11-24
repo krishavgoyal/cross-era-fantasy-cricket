@@ -1,0 +1,207 @@
+% CS F407 Artificial Intelligence: final project report template.
+% Limit: 2 pages, including everything except references.
+% Do not change the font size, margins or spacing.
+\documentclass[11pt,a4paper,twocolumn]{article}
+
+\usepackage[margin=2cm,columnsep=0.8cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+
+\titleformat{\section}{\normalsize\bfseries}{\thesection}{0.6em}{}
+\titlespacing*{\section}{0pt}{1.2ex plus 0.3ex}{0.6ex}
+\setlist{nosep,leftmargin=*}
+\setlength{\parskip}{0.3ex}
+
+\newcommand{\coursename}{CS F407 Artificial Intelligence, AY 2026--27 Semester I}
+\newcommand{\teamno}{Team CTRL+AI}
+\newcommand{\githuburl}{https://github.com/krishavgoyal/Cross_Era_Fantasy_Cricket}
+
+\begin{document}
+
+\twocolumn[{%
+\begin{center}
+  {\large\bfseries Cross-Era Fantasy Cricket: Animating Historical Cricketers with Modern Motion}\\[1ex]
+  \teamno\\
+  Pranahv Subramaniam Sankar (2024A4PS0423G), Ahaan Pathak (2024A3PS0396G),\\
+  Ankit Pandey (2024AAPS0808G), Krishav Goyal (2024A7PS0855G)\\[0.5ex]
+  {\small \coursename, BITS Pilani, K.K. Birla Goa Campus}\\[1.5ex]
+  \begin{minipage}{0.85\textwidth}
+    \small
+    \centerline{\bfseries Abstract}\vspace{0.5ex}
+    Fantasy cricket compares players across eras only through statistics. We make such match-ups visible: from
+    one archival photograph and a modern clip we generate a short video of the historical player performing the
+    modern motion, styled like footage of his era. DWPose extracts the motion on a laptop CPU; Wan2.1-VACE-1.3B
+    generates the clip on a free Kaggle T4 from the photo and a control video; post-processing retimes it and
+    applies 1930s/1970s/1990s filters. In a controlled ablation, a depth control instead of a pose skeleton kept
+    the bat in 5/5 runs (0/2 with the skeleton) and lowered brightness flicker from 2.38 to 1.68, with motion
+    accuracy (PCK@0.2) of 0.90--1.00. Our final video shows Harold Larwood bowling to Sir Don Bradman, and a
+    catalog renders the match in three era styles.
+  \end{minipage}
+\end{center}
+\vspace{1.5ex}
+}]
+
+\section{Introduction}
+What if Harold Larwood bowled to Sir Don Bradman, using motion filmed today? \textbf{Input:} one photograph of
+a historical player (appearance) and a clip of a modern player (motion). \textbf{Output:} a 2--6\,s video of
+the historical player performing that motion in the visual style of his era, labelled ``AI-generated''. We
+contribute (i)~a free pipeline (laptop CPU, free Kaggle GPU); (ii)~a player-only depth control that keeps the
+bat and removes bystanders; (iii)~a multi-seed ablation; (iv)~a cross-era match video and catalog; and (v)~an
+analysis of why a skeleton-driven baseline fails on fast bowling.
+
+\section{Background and related work}
+This is reference-guided human image animation. DWPose~\cite{dwpose} gives 2D joint sequences. Diffusion
+models with a reference branch (Animate Anyone~\cite{animateanyone}, MagicAnimate~\cite{magicanimate},
+MusePose~\cite{musepose}) animate a photo from poses; AnimateDiff~\cite{animatediff} adds temporal layers to
+image diffusion. Video diffusion
+transformers such as Wan2.1~\cite{wan} with VACE~\cite{vace} accept a reference image and a pose or depth video.
+Depth Anything V2~\cite{dav2} estimates monocular depth. The proposal named LTX-2~\cite{ltx2}, which uses the
+photo only as a first frame and needs 32\,GB+ GPUs, and MagicAnimate (2023), kept as a team baseline; we
+chose VACE.
+
+\section{Method}
+\textbf{Motion.} rtmlib DWPose-l runs on CPU; the player is chosen by a box on frame 0 and followed by best-IoU
+tracking. Joints with confidence $<0.3$ are masked, gaps of up to 4 frames interpolated, tracks smoothed
+(Savitzky--Golay, window 7) and resampled to 33 frames at 16\,fps on a 480$\times$832 canvas with an 8\% top
+margin. \textbf{Controls.} \emph{Skeleton}: an OpenPose-style render. \emph{Depth}: Depth Anything V2 on the
+same frames and crop, globally normalised (no flicker), head flattened so a modern helmet does not replace the
+face. \emph{Player-only depth} (bowler): a person mask kept only around the player's keypoints, so fielders
+vanish. \textbf{Reference.} rembg removes the photo background; the
+player is tightly cropped on white. \textbf{Generation.} Wan2.1-VACE-1.3B (fp16) in a headless ComfyUI on a
+Kaggle T4: 20 steps, CFG 5, shift 8. The negative prompt lists observed failures (extra balls, two bats,
+logos, hats). \textbf{Post-processing.} Frame blending retimes the batter to real speed
+at 24\,fps; the bowler is shown in 2$\times$ slow motion with frame holds, since blending ghosted the fast arm.
+Seeded era filters (1930s: grain, flicker, gate weave, 18\,fps; 1970s: scanlines, colour fringing, 25\,fps;
+1990s: chroma bleed, 25\,fps) burn in the label.
+
+\section{Experimental setup}
+\textbf{Data.} A modern cover drive (5.6\,s) and a front-on fast bowler (2.0\,s) supply motion; a portrait of
+Bradman and a public-domain 1929 portrait of Harold Larwood (National Library of Australia) supply appearance.
+\textbf{Runs.} A 2$\times$2 ablation, control (skeleton/depth) $\times$ reference (padded/tight crop), 17
+frames; seeds 42/7/123/2024 for depth with the tight crop; final 33-frame runs: batter F1 (seed 42) and bowler
+L1--L3 (seeds 42/7/2024). \textbf{Metrics.} PCK@0.2: DWPose on the output vs the control joints (17 joints,
+threshold 0.2$\times$ torso length). Identity: DINOv2~\cite{dinov2} cosine similarity of person crops vs the
+photo. Flicker: std of per-frame brightness. Bat: one rigid bat in every frame, by inspection.
+\textbf{Hardware.} The laptop CPU for everything except generation; on the Kaggle T4 a 33-frame clip takes
+${\approx}520$\,s at a 14.9\,GB peak, so clips stay at 33 frames. \textbf{Baselines.} Skeleton
+control; the team's DensePose-driven \mbox{AnimateDiff}/MagicAnimate engine; a skeleton-driven MusePose
+pipeline (Section~\ref{sec:disc}).
+
+\section{Results}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+Control (runs) & PCK & ID & Flicker & Bat \\
+\midrule
+Skeleton (A, C) & 0.95 & 0.19 & 2.38 & 0/2 \\
+Depth (B, D1--D4) & 0.97 & 0.23 & 1.68 & 5/5 \\
+\midrule
+Depth, batter F1 & 0.90 & 0.22 & 1.65 & yes \\
+Bowler L1--L3 & 0.81 & 0.11 & 3.67 & n/a \\
+Bowler L3 (chosen) & 0.80 & 0.12 & 1.81 & n/a \\
+\bottomrule
+\end{tabular}
+\caption{Means over runs; bowlers use player-only depth. Higher PCK@0.2 and ID (identity), lower flicker are
+better.}
+\label{tab:results}
+\end{table}
+
+\textbf{Depth fixes the bat.} With only a skeleton, which never describes the bat, the model loses or bends it;
+with depth, one rigid bat is held in every frame of all five runs, with no loss of motion accuracy and less
+flicker (Table~\ref{tab:results}). \textbf{The tight crop did not help likeness}: with the seed fixed it changed
+identity by $-0.02$ (vs the crop) and $-0.08$ (vs the original photo), while the seed alone moved it by up to
+0.14, so likeness comparisons need several seeds. \textbf{Bowler.} Player-only depth removed the fielders, and
+the negative prompt removed the photo's fedora, suit and cigarette. PCK is lower (0.79--0.85) because the
+bowling arm is the fastest, most blurred motion; L3 was chosen for its period kit and lowest flicker.
+\textbf{Eras and final video.} Era filters keep the motion: PCK falls by at most 0.08 (batter) and 0.12
+(bowler), while the 1930s gate weave raises warping error (5.7 to 9.8 for the batter). The final video joins
+Larwood (L3, slow motion) and Bradman (F1, real speed), both as 1930s film; a catalog renders the same match as
+1930s film, 1970s TV and 1990s broadcast, plus a style-swap version. \textbf{Team baseline.} \mbox{AnimateDiff}/MagicAnimate gave 384$\times$512 clips of 16 keyframes at 7\,fps,
+too coarse for a match.
+
+\section{Discussion and limitations}\label{sec:disc}
+\textbf{Why the skeleton baseline failed on bowling.} It fits a rigid 3D skeleton to DWPose and
+MediaPipe~\cite{mediapipe} joints and drives MusePose. At a stricter PCK@0.1 (not comparable to
+Table~\ref{tab:results}) it scored 0.963 on batting but 0.64 on bowling: its dark, side-on slow-motion bowling
+clip blurred the arm and lost the feet, and a skeleton does not say which limb is in front, so the bowler was
+detected mirrored in up to 60\% of frames (0.88 if mirroring is allowed). The VACE bowler used a sharp,
+front-on clip and depth, which fixes front/back order. \textbf{Limitations.} Face likeness is
+weak (identity 0.1--0.3), the helmet outline can become a dark cap, clips are short (33 frames), and the players
+are generated separately. \textbf{Ethics.} Every frame is labelled AI-generated; modern clips are used only for motion, not
+redistributed, with overlays blurred. \textbf{Next:} longer clips and a face adapter.
+
+\section{Conclusion}
+A free pipeline animates historical cricketers convincingly for batting. Depth control matters more than the
+reference crop, and clean footage matters most for bowling.
+
+\section*{Individual member contributions}
+{\small
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+Name & Contribution \\
+\midrule
+Ankit Pandey & Problem formulation, pipeline overview, limitations and ethics, Sections 1, 2 and 7. \\
+Pranahv S.\ Sankar & Team pose engine, rigid 3D skeleton fit and the MusePose baseline, Section 6. \\
+Ahaan Pathak & Model survey and the AnimateDiff/MagicAnimate team baseline. \\
+Krishav Goyal & VACE pipeline and depth controls, ablation, bowler, era filters, evaluation, catalog,
+video, Sections 3--5. \\
+\bottomrule
+\end{tabularx}}
+
+\smallskip
+\noindent All members have read this report and agree with the statement above.
+
+\section*{Generative AI disclosure}
+We used Claude (Anthropic, Claude Opus 5.5) in the Claude app for research, guidance, drafting this report
+and editing the video (captions, voice clean-up), and Claude Code (Claude Opus 5.5) to write and debug the
+code in \texttt{scripts/}, \texttt{kaggle/}, \texttt{motion3d/} and \texttt{animate/}. We checked all output,
+ran the code ourselves, verified every number against our runs, and take responsibility for it.
+
+\section*{Code availability}
+\noindent Code and data:\\
+\url{\githuburl}\\
+The repository is public and its README gives instructions to reproduce the results reported here.
+
+\begin{thebibliography}{99}
+\small
+\bibitem{dwpose}
+Z.~Yang, A.~Zeng, C.~Yuan and Y.~Li. Effective whole-body pose estimation with two-stages distillation.
+arXiv:2307.15880, 2023.
+\bibitem{animateanyone}
+L.~Hu, X.~Gao, P.~Zhang, K.~Sun, B.~Zhang and L.~Bo. Animate Anyone: consistent and controllable image-to-video
+synthesis for character animation. arXiv:2311.17117, 2023.
+\bibitem{magicanimate}
+Z.~Xu, J.~Zhang, J.~H.~Liew, H.~Yan, J.-W.~Liu, C.~Zhang, J.~Feng and M.~Z.~Shou. MagicAnimate: temporally
+consistent human image animation using diffusion model. arXiv:2311.16498, 2023.
+\bibitem{musepose}
+Z.~Tong, C.~Li, Z.~Chen, B.~Wu and W.~Zhou. MusePose: a pose-driven image-to-video framework for virtual human
+generation. \url{https://github.com/TMElyralab/MusePose}, 2024.
+\bibitem{animatediff}
+Y.~Guo, C.~Yang, A.~Rao, Z.~Liang, Y.~Wang, Y.~Qiao, M.~Agrawala, D.~Lin and B.~Dai. AnimateDiff: animate your
+personalized text-to-image diffusion models without specific tuning. arXiv:2307.04725, 2023.
+\bibitem{wan}
+Wan Team. Wan: open and advanced large-scale video generative models. arXiv:2503.20314, 2025.
+\bibitem{vace}
+Z.~Jiang, Z.~Han, C.~Mao, J.~Zhang, Y.~Pan and Y.~Liu. VACE: all-in-one video creation and editing.
+arXiv:2503.07598, 2025.
+\bibitem{dav2}
+L.~Yang, B.~Kang, Z.~Huang, Z.~Zhao, X.~Xu, J.~Feng and H.~Zhao. Depth Anything V2. arXiv:2406.09414, 2024.
+\bibitem{ltx2}
+Y.~HaCohen et al.\ (Lightricks). LTX-2: efficient joint audio-visual foundation model. arXiv:2601.03233, 2026.
+\bibitem{dinov2}
+M.~Oquab et al. DINOv2: learning robust visual features without supervision. arXiv:2304.07193, 2023.
+\bibitem{mediapipe}
+C.~Lugaresi et al. MediaPipe: a framework for building perception pipelines. arXiv:1906.08172, 2019.
+\end{thebibliography}
+
+\end{document}
